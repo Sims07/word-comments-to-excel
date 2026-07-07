@@ -188,9 +188,13 @@
       }
     });
 
+    // Auto-détection BO / FO simple et sensible à la casse
     var boFo = 'NA';
-    if (/\bBO\b/i.test(fileName)) boFo = 'BO';
-    else if (/\bFO\b/i.test(fileName)) boFo = 'FO';
+    if (fileName.includes('BO')) {
+      boFo = 'BO';
+    } else if (fileName.includes('FO')) {
+      boFo = 'FO';
+    }
 
     return comments.map(function (c, idx) {
       var d = parseDateToken(c.horodatageBrut);
