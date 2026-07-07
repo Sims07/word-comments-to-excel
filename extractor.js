@@ -138,7 +138,7 @@
   }
 
   // ---------- Parsing des commentaires ----------
-  // Ligne de titre attendue : "Page 11 : Commenté [VM1]Vincent MORHET (Marcoussis)28/11/2025 10:23"
+  // Ligne de titre attendue : "Page 11 : Commenté [VM1]John Doe (XXX)28/11/2025 10:23"
   var TITLE_RE = /^Page\s+(\d+)\s*:\s*Comment[ée]e?\s*\[([^\]]+)\]\s*(.+?)\s*\(([^)]+)\)\s*(.*)$/i;
   var DATE_RE = /(\d{1,2}\/\d{1,2}\/\d{2,4})(?:[^0-9]{1,3}(\d{1,2}:\d{2}))?/;
   var PRIORITY_TAG_RE = /#\s*([0-9])\b/;
