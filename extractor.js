@@ -1,8 +1,8 @@
 /*
- * FDL Extractor v1.3
+ * FDL Extractor v1.5
  * Transforme un PDF "Liste des marques de révision et commentaires" (Word) en fichier Excel de Fiche De Lecture.
  * Usage : coller ce script entier dans la console développeur (F12) de n'importe quelle page, puis Entrée.
- * Rien n'est envoyé sur un serveur : tout se passe dans le navigateur (pdf.js + SheetJS, et Tesseract.js en mode OCR).
+ * Optimisé pour supporter les relecteurs sans entité/lieu entre parenthèses et les références complexes.
  */
 (function () {
   'use strict';
@@ -31,13 +31,16 @@
     { key: 'remarque', label: 'Remarque', editable: true, width: 'auto', type: 'textarea' }
   ];
 
-  // Plages Unicode improbables dans un document français : leur présence trahit presque toujours
-  // un problème de police/encodage côté PDF (glyphe mal mappé), pas un vrai contenu en CJK/Hangul.
   var SUSPECT_RE = /[\u3040-\u30FF\u3400-\u9FFF\uAC00-\uD7A3\uF900-\uFAFF]/;
+  
+  // REGEX V1.5 : Rend l'auteur, le lieu () et la date optionnels pour éviter les fusions de lignes
+  var TITLE_RE = /^Page\s+(\d+)\s*:\s*Comment[ée]e?\s*\[([\s\S]+?)\](?:\s+([\s\S]+?))?(?:\s*\(([^)]+)\))?\s*(\d{1,2}\/\d{1,2}\/\d{2,4}.*|$)/i;
+  var DATE_RE = /(\d{1,2}\/\d{1,2}\/\d{2,4})(?:[^0-9]{1,3}(\d{1,2}:\d{2}(?::\d{2})?))?/;
+  var PRIORITY_TAG_RE = /#\s*([0-9])\b/;
+  var VERSION_RE = /\bV(\d{1,2})\b/i;
 
   var state = { rows: [], fileName: '', ocrMode: false, filter: '' };
 
-  // ---------- Chargement dynamique des librairies ----------
   function loadScript(src) {
     return new Promise(function (resolve, reject) {
       var s = document.createElement('script');
@@ -65,7 +68,6 @@
     return loadScript(TESSERACT_URL);
   }
 
-  // ---------- Extraction du texte du PDF : mode normal (calque texte pdf.js) ----------
   function extractLinesText(pdfDoc) {
     var allLines = [];
     var pageCount = pdfDoc.numPages;
@@ -89,14 +91,13 @@
             }
           });
           if (curLine.length) allLines.push(curLine.map(function (i) { return i.str; }).join(''));
-          allLines.push('\f'); // marqueur de saut de page
+          allLines.push('\f');
         });
     };
     for (var p = 1; p <= pageCount; p++) _loop(p);
     return chain.then(function () { return allLines; });
   }
 
-  // ---------- Extraction du texte du PDF : mode OCR (recours en cas de police mal encodée) ----------
   function renderPageToCanvas(page, scale) {
     var viewport = page.getViewport({ scale: scale || 2.5 });
     var canvas = document.createElement('canvas');
@@ -137,12 +138,6 @@
       .then(function () { return allLines; });
   }
 
-  // ---------- Parsing des commentaires ----------
-  // Ligne de titre attendue : "Page 11 : Commenté [VM1]John Doe (XXX)28/11/2025 10:23"
-  var TITLE_RE = /^Page\s+(\d+)\s*:\s*Comment[ée]e?\s*\[([^\]]+)\]\s*(.+?)\s*\(([^)]+)\)\s*(.*)$/i;
-  var DATE_RE = /(\d{1,2}\/\d{1,2}\/\d{2,4})(?:[^0-9]{1,3}(\d{1,2}:\d{2}))?/;
-  var PRIORITY_TAG_RE = /#\s*([0-9])\b/;
-
   function parseDateToken(str) {
     var m = str && str.match(DATE_RE);
     if (!m) return null;
@@ -153,7 +148,7 @@
     return isNaN(date.getTime()) ? null : date;
   }
 
-  function parseComments(lines, fileName) {
+  function parseComments(lines, fileName, detectedVersion) {
     var comments = [];
     var current = null;
     lines.forEach(function (raw) {
@@ -162,12 +157,23 @@
       var m = line.match(TITLE_RE);
       if (m) {
         if (current) comments.push(current);
+        
+        var auteurBrut = (m[3] || '').trim();
+        var horodatage = (m[5] || '').trim();
+        
+        // Sécurité si l'auteur et la date sont collés sans espace (Ex: Valentin Petit04/06/2025)
+        var dateMatch = auteurBrut.match(DATE_RE);
+        if (dateMatch && !horodatage) {
+          horodatage = auteurBrut.substring(dateMatch.index);
+          auteurBrut = auteurBrut.substring(0, dateMatch.index).trim();
+        }
+
         current = {
           page: m[1],
           refInterne: m[2].trim(),
-          auteur: m[3].trim(),
-          lieu: m[4].trim(),
-          horodatageBrut: m[5].trim(),
+          auteur: auteurBrut || 'Anonyme',
+          lieu: (m[4] || '').trim(),
+          horodatageBrut: horodatage,
           texteLignes: []
         };
       } else if (current) {
@@ -176,7 +182,6 @@
     });
     if (current) comments.push(current);
 
-    // Si l'horodatage n'a pas été trouvé sur la ligne de titre, on regarde si la 1ère ligne de contenu est en fait la date
     comments.forEach(function (c) {
       if (!parseDateToken(c.horodatageBrut) && c.texteLignes.length && parseDateToken(c.texteLignes[0])) {
         c.horodatageBrut = c.texteLignes.shift();
@@ -190,9 +195,8 @@
     return comments.map(function (c, idx) {
       var d = parseDateToken(c.horodatageBrut);
       var remarque = c.texteLignes.join(' ').replace(/\s+/g, ' ').trim();
-
-      // Priorité déduite d'un tag "#0".."#9" présent dans la remarque (ex: "#0 : blocage sur ...")
       var priorite = '';
+      
       var pm = remarque.match(PRIORITY_TAG_RE);
       if (pm) {
         priorite = 'P' + pm[1];
@@ -206,7 +210,7 @@
         priorite: priorite,
         jira: '',
         boFo: boFo,
-        version: '',
+        version: detectedVersion,
         pageParagraphe: c.page,
         contenu: '',
         remarque: remarque
@@ -214,7 +218,6 @@
     });
   }
 
-  // ---------- Export Excel ----------
   function exportXlsx() {
     var header = COLUMNS.map(function (c) { return c.label; });
     var data = [header].concat(state.rows.map(function (r) {
@@ -231,7 +234,6 @@
     window.XLSX.writeFile(wb, base + '_FDL.xlsx');
   }
 
-  // ---------- Interface — palette inspirée de l'identité Assurance Maladie / ameli ----------
   function injectStyles() {
     var style = document.createElement('style');
     style.id = 'fdl-extractor-style';
@@ -454,7 +456,6 @@
         renderTable();
       });
     });
-
     document.getElementById('fdl-export').disabled = state.rows.length === 0;
     renderStats();
     updateWarningBanner();
@@ -490,6 +491,10 @@
     var file = ev.target.files[0];
     if (!file) return;
     state.fileName = file.name;
+    
+    var versionMatch = file.name.match(VERSION_RE);
+    var detectedVersion = versionMatch ? versionMatch[1] : '';
+
     var uploadBtn = document.getElementById('fdl-upload-btn');
     document.getElementById('fdl-upload-label').textContent = file.name;
     uploadBtn.classList.add('fdl-has-file');
@@ -510,7 +515,7 @@
         return extractLinesText(pdfDoc);
       })
       .then(function (lines) {
-        var comments = parseComments(lines, state.fileName);
+        var comments = parseComments(lines, state.fileName, detectedVersion);
         state.rows = comments;
         renderTable();
         setStatus(comments.length + ' commentaire(s) extrait(s)' + (state.ocrMode ? ' (OCR)' : '') + '.');
