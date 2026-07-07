@@ -4,12 +4,7 @@ Petit outil console (aucune installation, aucun serveur) qui transforme un PDF *
 
 ## Utilisation
 
-1. Ouvrir n'importe quelle page dans le navigateur (peu importe laquelle).
-2. Ouvrir la console développeur (F12, onglet *Console*).
-3. Coller le contenu de `fdl-extractor.js` et valider (Entrée).
-4. Un panneau s'affiche en haut à droite : cliquer sur **Choisir un fichier**, sélectionner le PDF des commentaires.
-5. L'outil charge `pdf.js` et `SheetJS` depuis un CDN, extrait le texte du PDF et remplit un tableau éditable.
-6. Compléter/ajuster les champs qui ne peuvent pas être déduits automatiquement du PDF (voir ci-dessous), puis cliquer **Exporter en Excel** : un fichier `<nom_du_pdf>_FDL.xlsx` est téléchargé.
+1. Ouvrir https://sims07.github.io/word-comments-to-excel/install.html
 
 Rien n'est envoyé sur un serveur : tout le traitement (lecture du PDF, génération du xlsx) se fait dans le navigateur.
 
