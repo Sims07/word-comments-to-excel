@@ -1,10 +1,12 @@
 /*
- * FDL Extractor v1.10
+ * FDL Extractor v1.9
  * Transforme un PDF "Liste des marques de révision et commentaires" (Word) OU directement un fichier
  * Word (.docx) en fichier Excel de Fiche De Lecture.
  * Usage : coller ce script entier dans la console développeur (F12) de n'importe quelle page, puis Entrée.
  * Optimisé pour supporter les relecteurs sans entité/lieu entre parenthèses et les références complexes.
+ * Sécurisé contre les blocages silencieux de CDN (Proxy/Firewall).
  */
+
 (function () {
   'use strict';
 
@@ -56,7 +58,7 @@
     return { boFo: boFo, version: version };
   }
 
-  var state = { rows: [], fileName: '', ocrMode: false, filter: '' };
+  var state = { rows: [], fileName: '', ocrMode: false, filter: '', xlsxFallback: false };
 
   function loadScript(src) {
     return new Promise(function (resolve, reject) {
@@ -70,24 +72,31 @@
 
   function ensureLibs() {
     var p = Promise.resolve();
+    var TIMEOUT = 8000; 
+
     if (!window.pdfjsLib) {
-      p = p.then(function () { return loadScript(PDFJS_URL); })
+      p = p.then(function () { return loadScriptWithTimeout(PDFJS_URL, TIMEOUT); })
            .then(function () { window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL; });
     }
     if (!window.XLSX) {
-      p = p.then(function () { return loadScript(XLSX_URL); });
+      p = p.then(function () { 
+        return loadScriptWithTimeout(XLSX_URL, TIMEOUT); 
+      }).catch(function (err) {
+        console.warn('Impossible de charger SheetJS (XLSX). Mode de secours CSV activé.', err);
+        state.xlsxFallback = true;
+      });
     }
     return p;
   }
 
   function ensureTesseract() {
     if (window.Tesseract) return Promise.resolve();
-    return loadScript(TESSERACT_URL);
+    return loadScriptWithTimeout(TESSERACT_URL, 12000);
   }
 
   function ensurePako() {
     if (window.pako) return Promise.resolve();
-    return loadScript(PAKO_URL);
+    return loadScriptWithTimeout(PAKO_URL, 8000);
   }
 
   function inflateRaw(bytes) {
@@ -671,6 +680,8 @@
         renderTable();
       });
     });
+    var btnLabel = state.xlsxFallback ? 'Exporter en CSV (Secours)' : 'Exporter en Excel';
+    document.getElementById('fdl-export').textContent = btnLabel;
     document.getElementById('fdl-export').disabled = state.rows.length === 0;
     renderStats();
     updateWarningBanner();
@@ -737,7 +748,7 @@
       })
       .catch(function (err) {
         console.error(err);
-        setStatus('Erreur : ' + err.message);
+        setStatus('Erreur PDF : CDN bloqué ou inaccessible. Conseil : utilisez le mode Word (.docx) qui fonctionne à 100% en local.'); alert('Erreur de chargement des dépendances CDN (Proxy d\'entreprise).\n\nLe mode PDF est bloqué. Utilisez directement le bouton "Importer un Word (.docx)" : il s\'exécute 100% en local sans aucun réseau.');
       });
   }
 
@@ -765,7 +776,7 @@
       .catch(function (err) {
         clearTimeout(watchdog);
         console.error(err);
-        setStatus('Erreur : ' + err.message);
+        setStatus('Erreur PDF : CDN bloqué ou inaccessible. Conseil : utilisez le mode Word (.docx) qui fonctionne à 100% en local.'); alert('Erreur de chargement des dépendances CDN (Proxy d\'entreprise).\n\nLe mode PDF est bloqué. Utilisez directement le bouton "Importer un Word (.docx)" : il s\'exécute 100% en local sans aucun réseau.');
       });
   }
 
