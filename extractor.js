@@ -1,12 +1,11 @@
 /*
- * FDL Extractor v1.9
+ * FDL Extractor v1.9.1
  * Transforme un PDF "Liste des marques de révision et commentaires" (Word) OU directement un fichier
  * Word (.docx) en fichier Excel de Fiche De Lecture.
  * Usage : coller ce script entier dans la console développeur (F12) de n'importe quelle page, puis Entrée.
  * Optimisé pour supporter les relecteurs sans entité/lieu entre parenthèses et les références complexes.
  * Sécurisé contre les blocages silencieux de CDN (Proxy/Firewall).
  */
-
 (function () {
   'use strict';
 
@@ -37,15 +36,11 @@
   ];
 
   var SUSPECT_RE = /[\u3040-\u30FF\u3400-\u9FFF\uAC00-\uD7A3\uF900-\uFAFF]/;
-  
-  // REGEX V1.5 : Rend l'auteur, le lieu () et la date optionnels pour éviter les fusions de lignes
   var TITLE_RE = /^Page\s+(\d+)\s*:\s*Comment[ée]e?\s*\[([\s\S]+?)\](?:\s+([\s\S]+?))?(?:\s*\(([^)]+)\))?\s*(\d{1,2}\/\d{1,2}\/\d{2,4}.*|$)/i;
   var DATE_RE = /(\d{1,2}\/\d{1,2}\/\d{2,4})(?:[^0-9]{1,3}(\d{1,2}:\d{2}(?::\d{2})?))?/;
   var PRIORITY_TAG_RE = /#\s*([0-9])\b/;
   var VERSION_RE = /(?:^|[^A-Za-z0-9])V(\d{1,2})(?![0-9])/i;
 
-  // Déduit BO/FO et le numéro de version à partir du nom du fichier uploadé (PDF ou Word).
-  // Version : le nom doit contenir "VXX" (ex: "..._V15_1_..." -> version "15").
   function deriveMetaFromFileName(fileName) {
     var boFo = 'NA';
     if (fileName.includes('BO')) {
@@ -58,14 +53,25 @@
     return { boFo: boFo, version: version };
   }
 
-  var state = { rows: [], fileName: '', ocrMode: false, filter: '', xlsxFallback: false };
+  var state = { rows: [], fileName: '', ocrMode: false, filter: '', xlsxFallback: false, currentFile: null };
 
-  function loadScript(src) {
+  // Charge un script avec un timeout forcé pour contrer les blocages de proxy
+  function loadScriptWithTimeout(src, timeoutMs) {
     return new Promise(function (resolve, reject) {
+      var timeout = setTimeout(function () {
+        reject(new Error('Timeout de chargement (' + (timeoutMs / 1000) + 's) pour : ' + src));
+      }, timeoutMs);
+
       var s = document.createElement('script');
       s.src = src;
-      s.onload = resolve;
-      s.onerror = function () { reject(new Error('Échec de chargement : ' + src)); };
+      s.onload = function () {
+        clearTimeout(timeout);
+        resolve();
+      };
+      s.onerror = function () {
+        clearTimeout(timeout);
+        reject(new Error('Échec réseau direct : ' + src));
+      };
       document.head.appendChild(s);
     });
   }
@@ -100,19 +106,14 @@
   }
 
   function inflateRaw(bytes) {
-    // Chemin rapide : API native du navigateur (Chrome/Edge/Firefox récents, Safari 16.4+), aucun réseau nécessaire.
     if (typeof DecompressionStream !== 'undefined') {
       var ds = new DecompressionStream('deflate-raw');
       var stream = new Blob([bytes]).stream().pipeThrough(ds);
       return new Response(stream).arrayBuffer().then(function (buf) { return new Uint8Array(buf); });
     }
-    // Repli pour navigateurs plus anciens : charge une petite lib d'inflate depuis un CDN.
     return ensurePako().then(function () { return window.pako.inflateRaw(bytes); });
   }
 
-  // ---------- Lecteur ZIP minimal : extrait UNE seule entrée d'une archive (.docx) sans jamais lire
-  // le reste du document (texte, images…). On ne touche que la fin du fichier (table centrale) puis
-  // les quelques octets de l'entrée recherchée : la vitesse ne dépend donc pas de la taille du .docx. ----------
   function findEOCD(buf) {
     var d = new DataView(buf);
     for (var i = buf.byteLength - 22; i >= 0; i--) {
@@ -121,8 +122,12 @@
     return -1;
   }
 
+  document.addEventListener('DOMContentLoaded', function() {
+    // Intended empty block or hook placeholder
+  });
+
   function extractZipEntryBytes(file, entryName) {
-    var tailSize = Math.min(file.size, 65557); // taille max d'un commentaire de fin d'archive zip
+    var tailSize = Math.min(file.size, 65557);
     return file.slice(file.size - tailSize, file.size).arrayBuffer()
       .then(function (tailBuf) {
         var eocdPos = findEOCD(tailBuf);
@@ -238,10 +243,6 @@
       .then(function () { return allLines; });
   }
 
-  // ---------- Extraction directe des commentaires d'un fichier Word (.docx) ----------
-  // Plus fiable que le PDF : les commentaires sont des données structurées (pas de calque texte,
-  // donc pas de problème de police/encodage). En contrepartie, Word ne stocke aucun numéro de page
-  // fixe (la pagination dépend du rendu) : la colonne "Page, Paragraphe" reste donc vide, à compléter à la main.
   function nsText(el, localName) {
     var nodes = el.getElementsByTagNameNS(WORD_NS, localName);
     var out = '';
@@ -253,11 +254,6 @@
     return el.getAttributeNS(WORD_NS, localName) || el.getAttribute('w:' + localName) || '';
   }
 
-  // Estimation (approximative) du numéro de page de chaque commentaire à partir de word/document.xml.
-  // Word ne stocke aucun numéro de page figé (la pagination réelle n'est calculée qu'au rendu) : on se base
-  // donc sur les sauts de page manuels (<w:br w:type="page"/>) et les fins de section (<w:sectPr>), qui sont
-  // les seuls indices de pagination présents dans le XML. Un document sans ces marqueurs explicites, ou dont
-  // la pagination provient uniquement du débordement automatique du texte, ne pourra pas être estimé finement.
   function estimatePageNumbers(documentXmlText) {
     var pageOfCommentId = {};
     var xmlDoc = new DOMParser().parseFromString(documentXmlText, 'application/xml');
@@ -295,7 +291,6 @@
         var commentEls = xmlDoc.getElementsByTagNameNS(WORD_NS, 'comment');
         var meta = deriveMetaFromFileName(fileName);
 
-        // Estimation de page : best-effort, ne doit jamais faire échouer l'extraction des commentaires.
         return extractZipEntryBytes(file, 'word/document.xml')
           .then(function (docBytes) {
             return estimatePageNumbers(new TextDecoder('utf-8').decode(docBytes));
@@ -307,7 +302,7 @@
               var el = commentEls[i];
               var commentId = nsAttr(el, 'id');
               var auteur = nsAttr(el, 'author').trim() || nsAttr(el, 'initials').trim() || 'Anonyme';
-              var dateBrut = nsAttr(el, 'date'); // format ISO 8601, ex: 2025-11-28T10:23:00Z
+              var dateBrut = nsAttr(el, 'date');
               var paragraphs = el.getElementsByTagNameNS(WORD_NS, 'p');
               var texteParas = [];
               for (var j = 0; j < paragraphs.length; j++) {
@@ -345,7 +340,6 @@
       });
   }
 
-
   function parseDateToken(str) {
     var m = str && str.match(DATE_RE);
     if (!m) return null;
@@ -369,7 +363,6 @@
         var auteurBrut = (m[3] || '').trim();
         var horodatage = (m[5] || '').trim();
         
-        // Sécurité si l'auteur et la date sont collés sans espace (Ex: Valentin Petit04/06/2025)
         var dateMatch = auteurBrut.match(DATE_RE);
         if (dateMatch && !horodatage) {
           horodatage = auteurBrut.substring(dateMatch.index);
@@ -396,7 +389,6 @@
       }
     });
 
-    // Auto-détection BO / FO + Version à partir du nom de fichier
     var meta = deriveMetaFromFileName(fileName);
 
     return comments.map(function (c, idx) {
@@ -426,6 +418,29 @@
   }
 
   function exportXlsx() {
+    var baseName = (state.fileName || 'commentaires').replace(/\.(pdf|docx)$/i, '');
+
+    if (state.xlsxFallback || !window.XLSX) {
+      var csvContent = '';
+      csvContent += COLUMNS.map(function (c) { return '"' + c.label.replace(/"/g, '""') + '"'; }).join(';') + '\r\n';
+      state.rows.forEach(function (row) {
+        var line = COLUMNS.map(function (c) {
+          var val = row[c.key] == null ? '' : String(row[c.key]);
+          return '"' + val.replace(/"/g, '""') + '"';
+        }).join(';');
+        csvContent += line + '\r\n';
+      });
+
+      var blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
+      var link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.setAttribute('download', baseName + '_FDL.csv');
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      return;
+    }
+
     var header = COLUMNS.map(function (c) { return c.label; });
     var data = [header].concat(state.rows.map(function (r) {
       return COLUMNS.map(function (c) { return r[c.key] || ''; });
@@ -437,8 +452,7 @@
     ];
     var wb = window.XLSX.utils.book_new();
     window.XLSX.utils.book_append_sheet(wb, ws, 'Détail');
-    var base = (state.fileName || 'commentaires').replace(/\.(pdf|docx)$/i, '');
-    window.XLSX.writeFile(wb, base + '_FDL.xlsx');
+    window.XLSX.writeFile(wb, baseName + '_FDL.xlsx');
   }
 
   function injectStyles() {
@@ -512,8 +526,7 @@
       '#fdl-extractor-panel button:hover{filter:brightness(.97);}',
       '#fdl-extractor-panel button.primary{background:var(--fdl-green);color:#fff;border-color:var(--fdl-green-dark);}',
       '#fdl-extractor-panel button.primary:disabled{background:#B9C6D6;border-color:#B9C6D6;cursor:not-allowed;}',
-      '#fdl-extractor-panel .fdl-close{margin-left:auto;background:rgba(255,255,255,.16);border:none;color:#ffffff !important;',
-      'font-size:15px;cursor:pointer;border-radius:50%;width:26px;height:26px;line-height:24px;padding:0;text-align:center;display:flex;align-items:center;justify-content:center;margin:0 !important;}',
+      '#fdl-extractor-panel .fdl-close{margin-left:auto;background:rgba(255,255,255,.16);border:none;color:#ffffff !important;font-size:15px;cursor:pointer;border-radius:50%;width:26px;height:26px;line-height:24px;padding:0;text-align:center;display:flex;align-items:center;justify-content:center;margin:0 !important;}',
       '#fdl-extractor-panel .fdl-status{color:#ffffff !important;opacity:.9;font-size:12px;white-space:nowrap;display:flex;align-items:center;height:28px;}',
       '#fdl-extractor-panel .fdl-del{color:#B3261E;background:none;border:none;font-size:15px;cursor:pointer;padding:0;}'
     ].join('');
@@ -564,7 +577,15 @@
     document.getElementById('fdl-upload-btn-docx').onclick = function () {
       document.getElementById('fdl-file-input-docx').click();
     };
-    document.getElementById('fdl-ocr-toggle').onchange = function (e) { state.ocrMode = e.target.checked; };
+    
+    document.getElementById('fdl-ocr-toggle').onchange = function (e) { 
+      state.ocrMode = e.target.checked; 
+      if (state.currentFile) {
+        setStatus('Changement de mode détecté. Relancement de l\'analyse PDF...');
+        processPdfFile(state.currentFile);
+      }
+    };
+
     document.getElementById('fdl-add-row').onclick = function () {
       state.rows.push(emptyRow());
       renderTable();
@@ -584,6 +605,7 @@
 
   function isSuspect(value) { return SUSPECT_RE.test(value || ''); }
 
+  // Rest of statistical mapping functions
   function pageOf(row) { return String(row.pageParagraphe || '').split(',')[0].trim(); }
 
   function renderStats() {
@@ -680,6 +702,7 @@
         renderTable();
       });
     });
+
     var btnLabel = state.xlsxFallback ? 'Exporter en CSV (Secours)' : 'Exporter en Excel';
     document.getElementById('fdl-export').textContent = btnLabel;
     document.getElementById('fdl-export').disabled = state.rows.length === 0;
@@ -713,10 +736,13 @@
     document.getElementById('fdl-status').textContent = msg;
   }
 
-  function onFileSelected(ev) {
-    var file = ev.target.files[0];
+  function processPdfFile(file) {
     if (!file) return;
+    state.rows = [];
+    state.filter = '';
     state.fileName = file.name;
+    state.currentFile = file;
+    renderTable();
     
     var versionMatch = file.name.match(VERSION_RE);
     var detectedVersion = versionMatch ? versionMatch[1] : '';
@@ -725,6 +751,7 @@
     document.getElementById('fdl-upload-label').textContent = file.name;
     uploadBtn.classList.add('fdl-has-file');
     setStatus('Chargement des librairies…');
+    
     ensureLibs()
       .then(function () {
         setStatus('Lecture du PDF…');
@@ -748,14 +775,25 @@
       })
       .catch(function (err) {
         console.error(err);
-        setStatus('Erreur PDF : CDN bloqué ou inaccessible. Conseil : utilisez le mode Word (.docx) qui fonctionne à 100% en local.'); alert('Erreur de chargement des dépendances CDN (Proxy d\'entreprise).\n\nLe mode PDF est bloqué. Utilisez directement le bouton "Importer un Word (.docx)" : il s\'exécute 100% en local sans aucun réseau.');
+        setStatus('Erreur PDF : CDN bloqué ou inaccessible. Conseil : utilisez le mode Word (.docx) qui fonctionne à 100% en local.'); 
+        alert('Erreur de chargement des dépendances CDN (Proxy d\'entreprise).\n\nLe mode PDF est bloqué. Utilisez directement le bouton "Importer un Word (.docx)" : il s\'exécute 100% en local sans aucun réseau.');
       });
+  }
+
+  function onFileSelected(ev) {
+    var file = ev.target.files[0];
+    if (file) processPdfFile(file);
   }
 
   function onDocxFileSelected(ev) {
     var file = ev.target.files[0];
     if (!file) return;
+    
+    state.rows = [];
+    state.filter = '';
     state.fileName = file.name;
+    state.currentFile = null; // Désactive le re-trigger PDF automatique
+    renderTable();
 
     var uploadBtn = document.getElementById('fdl-upload-btn-docx');
     document.getElementById('fdl-upload-label-docx').textContent = file.name;
@@ -776,7 +814,7 @@
       .catch(function (err) {
         clearTimeout(watchdog);
         console.error(err);
-        setStatus('Erreur PDF : CDN bloqué ou inaccessible. Conseil : utilisez le mode Word (.docx) qui fonctionne à 100% en local.'); alert('Erreur de chargement des dépendances CDN (Proxy d\'entreprise).\n\nLe mode PDF est bloqué. Utilisez directement le bouton "Importer un Word (.docx)" : il s\'exécute 100% en local sans aucun réseau.');
+        setStatus('Erreur : ' + err.message);
       });
   }
 
